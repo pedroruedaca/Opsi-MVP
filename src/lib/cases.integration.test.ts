@@ -90,4 +90,58 @@ describe.skipIf(!url)('cases (Postgres)', () => {
     full = await mod.getCase(row.id);
     expect(full?.documents[0]).toMatchObject({ extractionStatus: 'needs_review', extractionSource: 'model', extractionModel: 'claude-opus-5' });
   });
+
+  it('runs the analysis on confirmed fields, locks the case, and re-runs after reopening', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const { runExtraction, reviewField } = await import('./review');
+    const { runAnalysis, reopenReview, listAnalyses } = await import('./analysis-runner');
+    const { db, schema } = dbMod;
+    const { eq, inArray } = await import('drizzle-orm');
+
+    const row = await mod.createCase({ borrowerName: 'Análisis S.L.', nif: 'B00000000', requestedAmount: '120000' });
+    const files: [string, 'modelo_303' | 'annual_accounts', string][] = [
+      ['modelo-303_2025_1T.pdf', 'modelo_303', '2025-Q1'], ['modelo-303_2025_2T.pdf', 'modelo_303', '2025-Q2'],
+      ['modelo-303_2025_3T.pdf', 'modelo_303', '2025-Q3'], ['modelo-303_2025_4T.pdf', 'modelo_303', '2025-Q4'],
+      ['cuentas-anuales_2025.pdf', 'annual_accounts', '2025'],
+    ];
+    const docIds: string[] = [];
+    for (const [file, type, period] of files) {
+      const doc = await mod.addDocument(row.id, { type, period, filename: file, bytes: new Uint8Array(await readFile(`samples/${file}`)) });
+      await runExtraction(doc.id);
+      docIds.push(doc.id);
+    }
+    await expect(runAnalysis(row.id)).rejects.toThrow(/Faltan documentos por revisar/);
+
+    const fields = await db.select().from(schema.fields).where(inArray(schema.fields.documentId, docIds));
+    for (const f of fields) await reviewField(f.id, f.extractedValue === null ? { action: 'clear' } : { action: 'confirm' });
+
+    const first = await runAnalysis(row.id);
+    expect(first.recommendation).toBe('APPROVE');
+    const [c1] = await db.select().from(schema.cases).where(eq(schema.cases.id, row.id));
+    expect(c1!.status).toBe('analysed');
+
+    // Locked: no field changes, no uploads, no second run.
+    await expect(reviewField(fields[0]!.id, { action: 'confirm' })).rejects.toThrow(/solo lectura/);
+    await expect(mod.addDocument(row.id, { type: 'modelo_303', period: '2024-Q4', filename: 'x.pdf', bytes: new TextEncoder().encode('%PDF-1.4\n' + crypto.randomUUID()) }))
+      .rejects.toThrow(/reabre la revisión/);
+    await expect(runAnalysis(row.id)).rejects.toThrow(/ya está analizado/);
+
+    await expect(reopenReview(row.id, ' ')).rejects.toThrow(/por qué/);
+    await reopenReview(row.id, 'Revisar deuda a largo plazo');
+    const debt = fields.find(f => f.key === 'long_term_bank_debt')!;
+    await reviewField(debt.id, { action: 'correct', value: '500.000,00', reason: 'Nuevo préstamo según pool bancario' });
+
+    const second = await runAnalysis(row.id);
+    expect(second.recommendation).toBe('DECLINE');
+    const all = await listAnalyses(row.id);
+    expect(all.map(a => a.recommendation)).toEqual(['DECLINE', 'APPROVE']);
+    // The first analysis kept its own snapshot.
+    const firstDebt = all[1]!.inputs.documents.find(d => d.type === 'annual_accounts')!.fields.long_term_bank_debt!;
+    expect(firstDebt).toMatchObject({ fieldId: debt.id, value: '250000.00' });
+    expect(all[0]!.inputs.policy.version).toBe(all[0]!.policyVersion);
+
+    const full = await mod.getCase(row.id);
+    expect(full!.events.filter(e => e.type === 'analysis.completed')).toHaveLength(2);
+    expect(full!.events.some(e => e.type === 'case.review_reopened')).toBe(true);
+  });
 });

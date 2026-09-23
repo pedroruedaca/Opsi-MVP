@@ -11,7 +11,7 @@ Opsi MVP helps credit analysts at Spanish alternative lenders turn a borrower's 
 
 **Every new feature must serve one of these four steps. If it doesn't, don't build it.**
 
-The full spec and phase plan is `docs/underwriting-mvp-prompt.md` in `pedroruedaca/Opsi`. **Phases 1 (ingest) and 2 (parse and review) are done. Phase 3 (analyse) is next.**
+The full spec and phase plan is `docs/underwriting-mvp-prompt.md` in `pedroruedaca/Opsi`. **Phases 1 (ingest), 2 (parse and review) and 3 (analyse) are done. Phase 4 (memo and decision) is next.**
 
 ## Non-negotiable principles
 
@@ -64,6 +64,21 @@ Multi-tenancy, roles, borrower portals, chat, workflow editors, billing, a separ
 - **Viewer:** `src/components/PdfViewer.tsx` uses the pdf.js **legacy** build, because the modern build needs `Map.getOrInsertComputed`. The worker is copied to `public/` by `predev`/`prebuild`.
   - It renders canvases and positions the highlight boxes from the text items.
   - `src/lib/quote-locator.ts` finds the quote, ignoring whitespace, case and dashes. It never matches partially or fuzzily, and it reports when a quote is found on a different page than stated.
+- **Analysis engine:** `src/lib/analysis.ts`. It's pure, with no I/O, clock or model, and uses `decimal.js`.
+  - `computeMetrics`:
+    - VAT turnover over 12 months comes from the latest 4 **consecutive** quarters.
+    - EBITDA uses the stated figure, otherwise operating result + |depreciation|.
+    - Financial debt is bank debt, long term + short term.
+    - Leverage isn't computed when EBITDA ≤ 0.
+    - The VAT-versus-accounts gap is only computed when the quarters and the accounts cover the same year.
+    - Each metric keeps its formula and its input field IDs.
+  - `computeChecks`: base × rate = quota, Σ quotas = [27], [27] − [45] = [46] (€1 tolerance), consecutive quarters, period, and NIF.
+  - `evaluatePolicy` produces explanations with numbers. `recommend` returns DECLINE on a hard failure; otherwise REFER on a borderline failure, missing data or a check that didn't pass; otherwise APPROVE.
+  - `metricCatalog` feeds `/policy`. A test keeps it in sync with the engine.
+- **Policy:** `src/policy/policy.ts` holds the versioned rules as data, with illustrative thresholds. Bump `version` on any change.
+- **Runner:** `src/lib/analysis-runner.ts`.
+  - `runAnalysis` requires `in_review` and every document confirmed. It stores an immutable `analyses` row, with an inputs snapshot including the full policy, and sets the case to `analysed`, which locks fields and uploads.
+  - `reopenReview` (reason required) returns the case to `in_review`. Old analyses are kept, and a new run supersedes them.
 - **Language:** the UI is in Spanish and the code is in English.
 
 ## Commands

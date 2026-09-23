@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq } from 'drizzle-orm';
+import { and, asc, count, desc, eq, sql } from 'drizzle-orm';
 import { db, schema } from '@/db';
 import { UploadValidationError, safeFilename, sha256Hex, validatePdfUpload, type DocumentType } from './documents';
 import { storeFile } from './storage';
@@ -12,9 +12,10 @@ export async function recordEvent(tx: Tx | typeof db, caseId: string, type: stri
 }
 
 export async function listCases() {
+  const latest = sql<string | null>`(select a.recommendation from ${schema.analyses} a where a.case_id = ${cases.id} order by a.created_at desc limit 1)`;
   const rows = await db
     .select({ id: cases.id, borrowerName: cases.borrowerName, nif: cases.nif, status: cases.status,
-      createdAt: cases.createdAt, documentCount: count(documents.id) })
+      createdAt: cases.createdAt, documentCount: count(documents.id), recommendation: latest })
     .from(cases)
     .leftJoin(documents, eq(documents.caseId, cases.id))
     .groupBy(cases.id)
@@ -42,6 +43,11 @@ export async function createCase(input: { borrowerName: string; nif: string; req
 
 export async function addDocument(caseId: string, input: { type: DocumentType; period: string; filename: string; bytes: Uint8Array }) {
   validatePdfUpload(input.filename, input.bytes);
+  const [c] = await db.select({ status: cases.status }).from(cases).where(eq(cases.id, caseId));
+  if (!c) throw new UploadValidationError('Caso no encontrado.');
+  if (c.status === 'analysed' || c.status === 'decided') {
+    throw new UploadValidationError('El caso ya está analizado: reabre la revisión para añadir documentos.');
+  }
   const filename = safeFilename(input.filename);
   const sha256 = await sha256Hex(input.bytes);
   const [existing] = await db.select({ id: documents.id }).from(documents)

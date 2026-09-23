@@ -25,8 +25,23 @@ npm run dev            # http://localhost:3000, log in with DEMO_PASSWORD
 |---|---|---|
 | 1 | Skeleton, demo login, cases, PDF upload with SHA-256, statuses, samples and seed | Done |
 | 2 | Extraction (Claude) and the side-by-side review with quote highlighting | Done |
-| 3 | Metrics, consistency checks, versioned policy, recommendation | Next |
-| 4 | Credit memo, decision, print layout, end-to-end test | Not started |
+| 3 | Metrics, consistency checks, versioned policy, recommendation | Done |
+| 4 | Credit memo, decision, print layout, end-to-end test | Next |
+
+### Phase 3 notes
+
+- **Running it:** the **Análisis** tab unlocks once every document is reviewed. It runs a deterministic calculation on the reviewed values; there's no AI in this step. Each run stores a snapshot of every input value and of the full policy.
+- **What it shows:**
+  - A recommendation: APPROVE, REFER or DECLINE.
+  - 6 policy rules, each with an explanation in numbers.
+  - 27 consistency checks for the demo case.
+  - 10 metrics, each with its formula and links back to the source field in the PDF.
+- **Locking:** once analysed, fields and uploads are locked. **Reabrir revisión** (reason required) unlocks them. Re-running creates a new analysis, and older ones stay in the history as replaced.
+- **Policy page:** `/policy` shows the rules, the metric formulas and the checks read-only. The thresholds are **illustrative**.
+- **Verified:**
+  - 83 Vitest tests. They include exact metric values for the demo borrower, the missing-versus-failing behaviour, the explanation wording, every consistency check, and a Postgres test of run → lock → reopen → re-run, with the snapshot kept.
+  - Two Playwright tests, one of them covering the whole path: review → APPROVE → source link → reopen → correction → DECLINE.
+  - `tsc` and `next build`.
 
 ### Phase 2 notes
 

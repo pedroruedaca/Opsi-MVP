@@ -16,6 +16,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Link href="/" className="text-base font-semibold tracking-tight text-brand">Opsi</Link>
             <nav className="flex items-center gap-5 text-sm text-muted">
               <Link href="/" className="hover:text-ink">Casos</Link>
+              <Link href="/policy" className="hover:text-ink">Política</Link>
               <form action="/logout" method="post"><button className="hover:text-ink">Salir</button></form>
             </nav>
           </div>

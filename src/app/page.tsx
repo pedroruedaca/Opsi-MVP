@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import NewCaseForm from '@/components/NewCaseForm';
+import { recommendationStyle } from '@/components/AnalysisView';
 import StatusBadge from '@/components/StatusBadge';
 import { listCases } from '@/lib/cases';
 import { caseStatusLabels } from '@/lib/documents';
@@ -31,7 +32,9 @@ export default async function CasesPage() {
                 <td className="px-4 py-3 num">{row.nif}</td>
                 <td className="px-4 py-3"><StatusBadge label={caseStatusLabels[row.status]} /></td>
                 <td className="px-4 py-3 text-right num">{row.documentCount}</td>
-                <td className="px-4 py-3 text-muted">—</td>
+                <td className="px-4 py-3">{row.recommendation
+                  ? <span className={`rounded border px-2 py-0.5 text-xs font-medium ${recommendationStyle[row.recommendation as keyof typeof recommendationStyle].cls}`}>{recommendationStyle[row.recommendation as keyof typeof recommendationStyle].label}</span>
+                  : <span className="text-muted">—</span>}</td>
                 <td className="px-4 py-3 num text-muted">{row.createdAt.toLocaleDateString('es-ES')}</td>
               </tr>
             ))}

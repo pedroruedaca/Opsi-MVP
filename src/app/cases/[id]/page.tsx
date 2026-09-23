@@ -1,12 +1,15 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { z } from 'zod';
+import AnalysisView, { recommendationStyle } from '@/components/AnalysisView';
 import AutoRefresh from '@/components/AutoRefresh';
+import CaseActionButton from '@/components/CaseActionButton';
 import DocumentUploader from '@/components/DocumentUploader';
 import ExtractButton from '@/components/ExtractButton';
 import ReviewWorkspace, { type ReviewDoc } from '@/components/ReviewWorkspace';
 import StatusBadge from '@/components/StatusBadge';
 import type { DocumentRow, EventRow, FieldRow } from '@/db/schema';
+import { listAnalyses } from '@/lib/analysis-runner';
 import { getCase } from '@/lib/cases';
 import { caseStatusLabels, documentTypeLabels, extractionStatusLabels } from '@/lib/documents';
 import { fieldDef, fieldDefs, formatValue } from '@/lib/fields';
@@ -26,6 +29,8 @@ const eventLabels: Record<string, string> = {
   'field.corrected': 'Campo corregido',
   'field.left_empty': 'Campo dejado vacío',
   'document.confirmed': 'Documento revisado',
+  'analysis.completed': 'Análisis ejecutado',
+  'case.review_reopened': 'Revisión reabierta',
 };
 
 const eur = (v: string) => Number(v).toLocaleString('es-ES', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
@@ -36,13 +41,14 @@ function eventDetail(event: EventRow): string | null {
   const parts: string[] = [];
   if (typeof p.filename === 'string') parts.push(p.filename);
   if (typeof p.key === 'string') parts.push(p.key);
+  if (event.type === 'analysis.completed' && typeof p.recommendation === 'string') parts.push(`recomendación ${p.recommendation}`, `política ${p.policyVersion}`);
   if (event.type === 'document.extraction_completed') parts.push(p.source === 'cached' ? 'caché' : String(p.model ?? 'IA'), `${p.fieldsFound}/${p.fieldsDefined} campos`);
   if (typeof p.error === 'string') parts.push(p.error);
   if (typeof p.reason === 'string' && p.reason) parts.push(`motivo: ${p.reason}`);
   return parts.length ? parts.join(' · ') : null;
 }
 
-// Cross-checks shown during review. They only warn; the deterministic checks come in Phase 3.
+// Early warnings during review. They only inform; the analysis runs the full consistency checks.
 function warnings(doc: DocumentRow, docFields: FieldRow[], caseNif: string): string[] {
   const value = (key: string) => {
     const f = docFields.find(x => x.key === key);
@@ -62,14 +68,15 @@ function warnings(doc: DocumentRow, docFields: FieldRow[], caseNif: string): str
 }
 
 export default async function CasePage({ params, searchParams }: {
-  params: Promise<{ id: string }>; searchParams: Promise<{ paso?: string }>;
+  params: Promise<{ id: string }>; searchParams: Promise<{ paso?: string; campo?: string }>;
 }) {
   const { id } = await params;
-  const { paso } = await searchParams;
+  const { paso, campo } = await searchParams;
   const data = z.uuid().safeParse(id).success ? await getCase(id) : null;
   if (!data) notFound();
 
-  const fieldRows = await getFieldsForCase(data.id);
+  const [fieldRows, analysisRows] = await Promise.all([getFieldsForCase(data.id), listAnalyses(data.id)]);
+  const latest = analysisRows[0] ?? null;
   const reviewable = data.documents.filter(d => d.extractionStatus === 'needs_review' || d.extractionStatus === 'confirmed');
   const working = data.documents.some(d => d.extractionStatus === 'extracting');
   const allConfirmed = data.documents.length > 0 && data.documents.every(d => d.extractionStatus === 'confirmed');
@@ -78,7 +85,7 @@ export default async function CasePage({ params, searchParams }: {
   const steps = [
     { id: 'documentos', label: 'Documentos', available: true },
     { id: 'revision', label: 'Revisión', available: reviewable.length > 0 },
-    { id: 'analisis', label: 'Análisis', available: false },
+    { id: 'analisis', label: 'Análisis', available: latest !== null || (allConfirmed && data.status === 'in_review') },
     { id: 'memo', label: 'Memo', available: false },
   ];
   const current = steps.find(s => s.id === paso && s.available)?.id ?? 'documentos';
@@ -112,6 +119,7 @@ export default async function CasePage({ params, searchParams }: {
           <span className="num text-sm text-muted">NIF {data.nif}</span>
           {data.requestedAmount && <span className="num text-sm text-muted">Solicitado {eur(data.requestedAmount)}</span>}
           <StatusBadge label={caseStatusLabels[data.status]} />
+          {latest && <span className={`rounded border px-2 py-0.5 text-xs font-medium ${recommendationStyle[latest.recommendation].cls}`}>{recommendationStyle[latest.recommendation].label}</span>}
         </div>
       </div>
 
@@ -123,7 +131,7 @@ export default async function CasePage({ params, searchParams }: {
           </Link>
         ) : (
           <span key={step.id} className="-mb-px border-b-2 border-transparent px-3 py-2 text-slate-400"
-            title={step.id === 'revision' ? 'Disponible cuando haya documentos extraídos' : 'Disponible en una fase posterior'}>
+            title={step.id === 'revision' ? 'Disponible cuando haya documentos extraídos' : step.id === 'analisis' ? 'Disponible cuando todos los documentos estén revisados' : 'Disponible en una fase posterior'}>
             {i + 1}. {step.label}
           </span>
         ))}
@@ -131,7 +139,9 @@ export default async function CasePage({ params, searchParams }: {
 
       {current === 'documentos' && (
         <section className="space-y-4">
-          <DocumentUploader caseId={data.id} />
+          {locked
+            ? <p className="rounded-lg border border-line bg-surface px-4 py-3 text-sm text-muted">El caso está analizado. Para añadir documentos, reabre la revisión desde la pestaña Análisis.</p>
+            : <DocumentUploader caseId={data.id} />}
           <div className="overflow-x-auto rounded-lg border border-line bg-surface">
             <table className="w-full text-left text-sm">
               <thead className="border-b border-line bg-slate-50 text-xs uppercase tracking-wide text-muted">
@@ -169,17 +179,37 @@ export default async function CasePage({ params, searchParams }: {
 
       {current === 'revision' && (
         <section className="space-y-4">
-          {allConfirmed
-            ? <p className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-ok">Revisión completa: todos los campos están confirmados. El análisis llega en la Fase 3.</p>
-            : <p className="text-sm text-muted">Confirma, corrige o deja vacío cada campo. El análisis solo usará valores revisados.</p>}
-          <ReviewWorkspace docs={reviewDocs} locked={locked} />
+          {locked
+            ? <p className="rounded-lg border border-line bg-surface px-4 py-3 text-sm text-muted">El caso está analizado: los campos son de solo lectura. Para cambiarlos, reabre la revisión desde la pestaña Análisis.</p>
+            : allConfirmed
+              ? <p className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-ok">Revisión completa: todos los campos están revisados. <Link href={`/cases/${data.id}?paso=analisis`} className="font-medium underline">Ir al análisis →</Link></p>
+              : <p className="text-sm text-muted">Confirma, corrige o deja vacío cada campo. El análisis solo usará valores revisados.</p>}
+          <ReviewWorkspace docs={reviewDocs} locked={locked} initialFieldId={campo ?? null} />
+        </section>
+      )}
+
+      {current === 'analisis' && (
+        <section className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-muted">Cálculo determinista sobre los valores revisados. La IA no interviene en este paso.</p>
+            {data.status === 'in_review' && allConfirmed && (
+              <CaseActionButton url={`/api/cases/${data.id}/analysis`} label={latest ? 'Volver a ejecutar el análisis' : 'Ejecutar análisis'} busyLabel="Analizando…" next={`/cases/${data.id}?paso=analisis`} />
+            )}
+            {data.status === 'analysed' && (
+              <CaseActionButton url={`/api/cases/${data.id}/reopen`} label="Reabrir revisión" busyLabel="Reabriendo…" reasonLabel="Motivo para reabrir la revisión" variant="secondary" />
+            )}
+          </div>
+          {data.status === 'in_review' && !allConfirmed && <p className="text-sm text-warn">Termina la revisión de todos los documentos para ejecutar el análisis.</p>}
+          {latest
+            ? <AnalysisView analysis={latest} history={analysisRows} caseId={data.id} stale={data.status === 'in_review'} />
+            : <p className="rounded-lg border border-line bg-surface px-4 py-6 text-center text-sm text-muted">Todavía no se ha ejecutado ningún análisis.</p>}
         </section>
       )}
 
       <section>
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">Actividad</h2>
-        <ol className="space-y-1 text-sm">
-          {data.events.map(event => {
+        {(() => {
+          const row = (event: EventRow) => {
             const detail = eventDetail(event);
             return (
               <li key={event.id} className="flex gap-3">
@@ -187,8 +217,21 @@ export default async function CasePage({ params, searchParams }: {
                 <span>{eventLabels[event.type] ?? event.type}{detail && <span className="text-muted"> · {detail}</span>}</span>
               </li>
             );
-          })}
-        </ol>
+          };
+          const recent = data.events.slice(-8);
+          const older = data.events.slice(0, -8);
+          return (
+            <div className="space-y-1 text-sm">
+              {older.length > 0 && (
+                <details>
+                  <summary className="cursor-pointer text-muted">Ver {older.length} eventos anteriores</summary>
+                  <ol className="mt-1 space-y-1">{older.map(row)}</ol>
+                </details>
+              )}
+              <ol className="space-y-1">{recent.map(row)}</ol>
+            </div>
+          );
+        })()}
       </section>
     </div>
   );

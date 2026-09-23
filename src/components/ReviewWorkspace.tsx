@@ -21,11 +21,13 @@ function outcomeLabel(f: ReviewField): { label: string; tone: 'neutral' | 'ok' |
   return f.status === 'corrected' ? { label: 'Corregido', tone: 'warn' } : { label: 'Confirmado', tone: 'ok' };
 }
 
-export default function ReviewWorkspace({ docs, locked }: { docs: ReviewDoc[]; locked: boolean }) {
+export default function ReviewWorkspace({ docs, locked, initialFieldId = null }: { docs: ReviewDoc[]; locked: boolean; initialFieldId?: string | null }) {
   const router = useRouter();
-  const [docId, setDocId] = useState(docs.find(d => d.fields.some(f => !f.reviewed))?.id ?? docs[0]?.id);
+  // A link from the analysis (?campo=<fieldId>) opens the review at that field, pinned.
+  const linkedDoc = initialFieldId ? docs.find(d => d.fields.some(f => f.id === initialFieldId)) : undefined;
+  const [docId, setDocId] = useState(linkedDoc?.id ?? docs.find(d => d.fields.some(f => !f.reviewed))?.id ?? docs[0]?.id);
   const [hovered, setHovered] = useState<string | null>(null);
-  const [pinned, setPinned] = useState<string | null>(null);
+  const [pinned, setPinned] = useState<string | null>(linkedDoc ? initialFieldId : null);
   const [editing, setEditing] = useState<{ id: string; mode: 'correct' | 'clear'; value: string; reason: string } | null>(null);
   const [error, setError] = useState<{ id: string; message: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
