@@ -7,6 +7,7 @@ import { borrower, vatQuarters, vatYear, annualAccounts } from './sample-data';
 
 const { db, schema } = await import('../src/db');
 const { addDocument, createCase } = await import('../src/lib/cases');
+const { runExtraction } = await import('../src/lib/review');
 
 const [existing] = await db.select().from(schema.cases).where(eq(schema.cases.nif, borrower.nif));
 if (existing) {
@@ -21,7 +22,9 @@ const files = [
 ];
 for (const f of files) {
   const bytes = new Uint8Array(await readFile(path.join(process.cwd(), 'samples', f.file)));
-  await addDocument(row.id, { type: f.type, period: f.period, filename: f.file, bytes });
+  const doc = await addDocument(row.id, { type: f.type, period: f.period, filename: f.file, bytes });
+  // Sample files match stored fixtures, so this uses the cached extraction (no API call).
+  await runExtraction(doc.id);
   console.log(`  + ${f.file}`);
 }
 console.log(`Demo case created: /cases/${row.id}`);

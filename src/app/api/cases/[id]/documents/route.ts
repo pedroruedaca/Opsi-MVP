@@ -1,9 +1,12 @@
-import { NextResponse, type NextRequest } from 'next/server';
+import { after, NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 import { addDocument, getCase } from '@/lib/cases';
+import { runExtraction } from '@/lib/review';
 import { MAX_UPLOAD_BYTES, UploadValidationError, uploadMetadataSchema } from '@/lib/documents';
 
 export const runtime = 'nodejs';
+// Extraction runs after the upload response (see after() below) within this function's lifetime.
+export const maxDuration = 300;
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -28,6 +31,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   try {
     const doc = await addDocument(id, { ...meta.data, filename: file.name, bytes: new Uint8Array(await file.arrayBuffer()) });
+    after(() => runExtraction(doc.id));
     return NextResponse.json({ id: doc.id, sha256: doc.sha256 }, { status: 201 });
   } catch (error) {
     if (error instanceof UploadValidationError) return NextResponse.json({ error: error.message }, { status: 400 });

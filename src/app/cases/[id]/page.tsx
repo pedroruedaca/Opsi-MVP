@@ -1,37 +1,110 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { z } from 'zod';
+import AutoRefresh from '@/components/AutoRefresh';
 import DocumentUploader from '@/components/DocumentUploader';
+import ExtractButton from '@/components/ExtractButton';
+import ReviewWorkspace, { type ReviewDoc } from '@/components/ReviewWorkspace';
 import StatusBadge from '@/components/StatusBadge';
+import type { DocumentRow, EventRow, FieldRow } from '@/db/schema';
 import { getCase } from '@/lib/cases';
 import { caseStatusLabels, documentTypeLabels, extractionStatusLabels } from '@/lib/documents';
+import { fieldDef, fieldDefs, formatValue } from '@/lib/fields';
+import { getFieldsForCase } from '@/lib/review';
 
 export const dynamic = 'force-dynamic';
-
-const steps = [
-  { id: 'documentos', label: 'Documentos', available: true },
-  { id: 'revision', label: 'Revisión', available: false },
-  { id: 'analisis', label: 'Análisis', available: false },
-  { id: 'memo', label: 'Memo', available: false },
-] as const;
 
 const extractionTone = { pending: 'neutral', extracting: 'info', needs_review: 'warn', confirmed: 'ok', failed: 'bad' } as const;
 
 const eventLabels: Record<string, string> = {
   'case.created': 'Caso creado',
   'document.uploaded': 'Documento subido',
+  'document.extraction_started': 'Extracción iniciada',
+  'document.extraction_completed': 'Extracción completada',
+  'document.extraction_failed': 'Error de extracción',
+  'field.confirmed': 'Campo confirmado',
+  'field.corrected': 'Campo corregido',
+  'field.left_empty': 'Campo dejado vacío',
+  'document.confirmed': 'Documento revisado',
 };
 
 const eur = (v: string) => Number(v).toLocaleString('es-ES', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
 const when = (d: Date) => d.toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' });
 
-export default async function CasePage({ params }: { params: Promise<{ id: string }> }) {
+function eventDetail(event: EventRow): string | null {
+  const p = (event.payload ?? {}) as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof p.filename === 'string') parts.push(p.filename);
+  if (typeof p.key === 'string') parts.push(p.key);
+  if (event.type === 'document.extraction_completed') parts.push(p.source === 'cached' ? 'caché' : String(p.model ?? 'IA'), `${p.fieldsFound}/${p.fieldsDefined} campos`);
+  if (typeof p.error === 'string') parts.push(p.error);
+  if (typeof p.reason === 'string' && p.reason) parts.push(`motivo: ${p.reason}`);
+  return parts.length ? parts.join(' · ') : null;
+}
+
+// Cross-checks shown during review. They only warn; the deterministic checks come in Phase 3.
+function warnings(doc: DocumentRow, docFields: FieldRow[], caseNif: string): string[] {
+  const value = (key: string) => {
+    const f = docFields.find(x => x.key === key);
+    return f ? (f.reviewedAt ? f.confirmedValue : f.extractedValue) : null;
+  };
+  const out: string[] = [];
+  const nif = value('nif');
+  if (nif && nif !== caseNif) out.push(`El NIF del documento (${nif}) no coincide con el del caso (${caseNif}).`);
+  const year = value('fiscal_year');
+  if (doc.type === 'modelo_303') {
+    const quarter = value('quarter');
+    if (year && quarter && `${year}-Q${quarter}` !== doc.period) out.push(`El periodo del documento (${year}-Q${quarter}) no coincide con el indicado al subirlo (${doc.period}).`);
+  } else if (year && year !== doc.period) {
+    out.push(`El ejercicio del documento (${year}) no coincide con el indicado al subirlo (${doc.period}).`);
+  }
+  return out;
+}
+
+export default async function CasePage({ params, searchParams }: {
+  params: Promise<{ id: string }>; searchParams: Promise<{ paso?: string }>;
+}) {
   const { id } = await params;
+  const { paso } = await searchParams;
   const data = z.uuid().safeParse(id).success ? await getCase(id) : null;
   if (!data) notFound();
 
+  const fieldRows = await getFieldsForCase(data.id);
+  const reviewable = data.documents.filter(d => d.extractionStatus === 'needs_review' || d.extractionStatus === 'confirmed');
+  const working = data.documents.some(d => d.extractionStatus === 'extracting');
+  const allConfirmed = data.documents.length > 0 && data.documents.every(d => d.extractionStatus === 'confirmed');
+  const locked = data.status === 'analysed' || data.status === 'decided';
+
+  const steps = [
+    { id: 'documentos', label: 'Documentos', available: true },
+    { id: 'revision', label: 'Revisión', available: reviewable.length > 0 },
+    { id: 'analisis', label: 'Análisis', available: false },
+    { id: 'memo', label: 'Memo', available: false },
+  ];
+  const current = steps.find(s => s.id === paso && s.available)?.id ?? 'documentos';
+
+  const reviewDocs: ReviewDoc[] = reviewable.map(doc => {
+    const docFields = fieldRows.filter(r => r.documentId === doc.id).map(r => r.field);
+    const order = fieldDefs[doc.type].map(f => f.key);
+    docFields.sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+    return {
+      id: doc.id, label: documentTypeLabels[doc.type], period: doc.period, filename: doc.filename, status: doc.extractionStatus,
+      source: doc.extractionSource, model: doc.extractionModel, warnings: warnings(doc, docFields, data.nif),
+      fields: docFields.map(f => {
+        const def = fieldDef(doc.type, f.key);
+        return {
+          id: f.id, key: f.key, label: def?.label ?? f.key, casilla: def?.casilla ?? null,
+          extracted: f.extractedValue, extractedDisplay: formatValue(doc.type, f.key, f.extractedValue),
+          confirmedDisplay: formatValue(doc.type, f.key, f.confirmedValue),
+          page: f.page, quote: f.quote, status: f.status, reviewed: f.reviewedAt !== null, correctionReason: f.correctionReason,
+        };
+      }),
+    };
+  });
+
   return (
     <div className="space-y-6">
+      <AutoRefresh active={working} />
       <div>
         <Link href="/" className="text-sm text-muted hover:text-ink">← Casos</Link>
         <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1">
@@ -42,63 +115,79 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
         </div>
       </div>
 
-      <ol className="flex flex-wrap gap-2 border-b border-line text-sm" aria-label="Pasos del caso">
-        {steps.map((step, i) => (
-          <li key={step.id}
-            className={`-mb-px border-b-2 px-3 py-2 ${step.available ? 'border-brand font-medium text-ink' : 'border-transparent text-slate-400'}`}
-            aria-current={step.available ? 'step' : undefined}
-            title={step.available ? undefined : 'Disponible en una fase posterior'}>
+      <nav className="flex flex-wrap gap-2 border-b border-line text-sm" aria-label="Pasos del caso">
+        {steps.map((step, i) => step.available ? (
+          <Link key={step.id} href={`/cases/${data.id}?paso=${step.id}`} aria-current={current === step.id ? 'step' : undefined}
+            className={`-mb-px border-b-2 px-3 py-2 ${current === step.id ? 'border-brand font-medium text-ink' : 'border-transparent text-muted hover:text-ink'}`}>
             {i + 1}. {step.label}
-          </li>
+          </Link>
+        ) : (
+          <span key={step.id} className="-mb-px border-b-2 border-transparent px-3 py-2 text-slate-400"
+            title={step.id === 'revision' ? 'Disponible cuando haya documentos extraídos' : 'Disponible en una fase posterior'}>
+            {i + 1}. {step.label}
+          </span>
         ))}
-      </ol>
+      </nav>
 
-      <section className="space-y-4">
-        <DocumentUploader caseId={data.id} />
+      {current === 'documentos' && (
+        <section className="space-y-4">
+          <DocumentUploader caseId={data.id} />
+          <div className="overflow-x-auto rounded-lg border border-line bg-surface">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-line bg-slate-50 text-xs uppercase tracking-wide text-muted">
+                <tr><th className="px-4 py-3">Documento</th><th className="px-4 py-3">Periodo</th><th className="px-4 py-3">Archivo</th>
+                  <th className="px-4 py-3">Subido</th><th className="px-4 py-3">SHA-256</th><th className="px-4 py-3">Estado</th></tr>
+              </thead>
+              <tbody>
+                {data.documents.length === 0 && <tr><td colSpan={6} className="px-4 py-8 text-center text-muted">Aún no hay documentos en este caso.</td></tr>}
+                {data.documents.map(doc => (
+                  <tr key={doc.id} className="border-b border-line last:border-0" data-testid="document-row">
+                    <td className="px-4 py-3 font-medium">{documentTypeLabels[doc.type]}</td>
+                    <td className="num px-4 py-3">{doc.period}</td>
+                    <td className="max-w-56 truncate px-4 py-3">
+                      <a href={`/api/documents/${doc.id}/file`} target="_blank" rel="noreferrer" className="text-brand hover:underline" title={doc.filename}>{doc.filename}</a>
+                    </td>
+                    <td className="num px-4 py-3 text-muted">{when(doc.uploadedAt)}</td>
+                    <td className="num px-4 py-3 font-mono text-xs text-muted" title={doc.sha256}>{doc.sha256.slice(0, 12)}…</td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <StatusBadge label={extractionStatusLabels[doc.extractionStatus]} tone={extractionTone[doc.extractionStatus]} />
+                        {doc.extractionSource === 'cached' && <span className="text-xs text-muted">caché</span>}
+                        {doc.extractionStatus === 'failed' && <ExtractButton documentId={doc.id} label="Reintentar" />}
+                        {doc.extractionStatus === 'pending' && <ExtractButton documentId={doc.id} label="Extraer datos" />}
+                        {doc.extractionStatus === 'needs_review' && <Link href={`/cases/${data.id}?paso=revision`} className="text-xs text-brand hover:underline">Revisar →</Link>}
+                      </div>
+                      {doc.extractionError && doc.extractionStatus === 'failed' && <p className="mt-1 text-xs text-bad">{doc.extractionError}</p>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
-        <div className="overflow-x-auto rounded-lg border border-line bg-surface">
-          <table className="w-full text-left text-sm">
-            <thead className="border-b border-line bg-slate-50 text-xs uppercase tracking-wide text-muted">
-              <tr><th className="px-4 py-3">Documento</th><th className="px-4 py-3">Periodo</th><th className="px-4 py-3">Archivo</th>
-                <th className="px-4 py-3">Subido</th><th className="px-4 py-3">SHA-256</th><th className="px-4 py-3">Estado</th></tr>
-            </thead>
-            <tbody>
-              {data.documents.length === 0 && <tr><td colSpan={6} className="px-4 py-8 text-center text-muted">Aún no hay documentos en este caso.</td></tr>}
-              {data.documents.map(doc => (
-                <tr key={doc.id} className="border-b border-line last:border-0">
-                  <td className="px-4 py-3 font-medium">{documentTypeLabels[doc.type]}</td>
-                  <td className="num px-4 py-3">{doc.period}</td>
-                  <td className="max-w-56 truncate px-4 py-3">
-                    <a href={`/api/documents/${doc.id}/file`} target="_blank" rel="noreferrer" className="text-brand hover:underline" title={doc.filename}>{doc.filename}</a>
-                  </td>
-                  <td className="num px-4 py-3 text-muted">{when(doc.uploadedAt)}</td>
-                  <td className="num px-4 py-3 font-mono text-xs text-muted" title={doc.sha256}>{doc.sha256.slice(0, 12)}…</td>
-                  <td className="px-4 py-3">
-                    <StatusBadge label={extractionStatusLabels[doc.extractionStatus]} tone={extractionTone[doc.extractionStatus]} />
-                    {doc.extractionError && <p className="mt-1 text-xs text-bad">{doc.extractionError}</p>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        {data.documents.length > 0 && (
-          <p className="text-xs text-muted">La extracción automática de datos llega en la Fase 2. Por ahora los documentos quedan en estado «Subido».</p>
-        )}
-      </section>
+      {current === 'revision' && (
+        <section className="space-y-4">
+          {allConfirmed
+            ? <p className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-ok">Revisión completa: todos los campos están confirmados. El análisis llega en la Fase 3.</p>
+            : <p className="text-sm text-muted">Confirma, corrige o deja vacío cada campo. El análisis solo usará valores revisados.</p>}
+          <ReviewWorkspace docs={reviewDocs} locked={locked} />
+        </section>
+      )}
 
       <section>
         <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-muted">Actividad</h2>
         <ol className="space-y-1 text-sm">
-          {data.events.map(event => (
-            <li key={event.id} className="flex gap-3">
-              <span className="num w-32 shrink-0 text-muted">{when(event.createdAt)}</span>
-              <span>{eventLabels[event.type] ?? event.type}
-                {event.type === 'document.uploaded' && typeof event.payload === 'object' && event.payload !== null && 'filename' in event.payload
-                  ? <span className="text-muted"> · {String(event.payload.filename)}</span> : null}
-              </span>
-            </li>
-          ))}
+          {data.events.map(event => {
+            const detail = eventDetail(event);
+            return (
+              <li key={event.id} className="flex gap-3">
+                <span className="num w-32 shrink-0 text-muted">{when(event.createdAt)}</span>
+                <span>{eventLabels[event.type] ?? event.type}{detail && <span className="text-muted"> · {detail}</span>}</span>
+              </li>
+            );
+          })}
         </ol>
       </section>
     </div>

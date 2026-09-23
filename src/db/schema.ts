@@ -29,6 +29,11 @@ export const documents = pgTable('documents', {
   uploadedAt: timestamp('uploaded_at', { withTimezone: true }).notNull().defaultNow(),
   extractionStatus: extractionStatus('extraction_status').notNull().default('pending'),
   extractionError: text('extraction_error'),
+  // 'model' = live Claude extraction, 'cached' = stored fixture for a known sample file.
+  extractionSource: text('extraction_source'),
+  extractionModel: text('extraction_model'),
+  extractionStartedAt: timestamp('extraction_started_at', { withTimezone: true }),
+  extractedAt: timestamp('extracted_at', { withTimezone: true }),
 }, t => [index('documents_case_idx').on(t.caseId)]);
 
 export const fields = pgTable('fields', {
@@ -42,6 +47,7 @@ export const fields = pgTable('fields', {
   quote: text('quote'),
   status: fieldStatus('status').notNull().default('proposed'),
   correctionReason: text('correction_reason'),
+  reviewedAt: timestamp('reviewed_at', { withTimezone: true }),
 }, t => [index('fields_document_idx').on(t.documentId)]);
 
 export const analyses = pgTable('analyses', {
@@ -79,3 +85,4 @@ export const events = pgTable('events', {
 export type Case = typeof cases.$inferSelect;
 export type DocumentRow = typeof documents.$inferSelect;
 export type EventRow = typeof events.$inferSelect;
+export type FieldRow = typeof fields.$inferSelect;
